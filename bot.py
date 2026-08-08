@@ -1,6 +1,7 @@
 import asyncio
 import re
 import sqlite3
+from aiohttp import web
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -218,7 +219,20 @@ async def process_expense(message: types.Message):
         await message.answer("⚠️ Формат туура эмес.\nМисалы: <code>Taxi 30</code> же <code>Taxi -30 comment</code>", parse_mode="HTML", reply_markup=get_reply_keyboard())
 
 # --- 7. Ботту иштетүү ---
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
 async def main():
+ #   print("Бот иштеп жатат...")
+ #   await dp.start_polling(bot)
+ # Render "Free Web Service" өчүрүп салбашы үчүн чакан веб-сервер
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+
     print("Бот иштеп жатат...")
     await dp.start_polling(bot)
 
