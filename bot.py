@@ -1,24 +1,32 @@
 import asyncio
 import re
 import sqlite3
-from aiohttp import web
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton
 )
+from aiohttp import web
 
-BOT_TOKEN = "8868559408:AAGKUVWQ2_Dbcqse9FdNpu69QhV-FvduTXw"
+BOT_TOKEN = "8868559408:AAGjKNE8kpKEA43cMQz907F-v1N2w_Jnnnw"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# --- FSM (Өзгөртүү абалын башкаруу) ---
+class EditState(StatesGroup):
+    waiting_for_amount = State()
+    waiting_for_category = State()
+    waiting_for_comment = State()
+
 # --- 1. Маалымат базасын түзүү ---
-conn = sqlite3.connect("expenses.db")
+conn = sqlite3.connect("expenses.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -54,7 +62,6 @@ def shift_month(year: int, month: int, shift: int):
         year -= 1
     return year, month
 
-# --- 2. Төмөнкү туруктуу баскычтар ---
 def get_reply_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -63,7 +70,6 @@ def get_reply_keyboard():
         resize_keyboard=True
     )
 
-# --- 3. Интерактивдүү статистика менюсун түзүү ---
 def build_stats_keyboard(user_id: int, year: int, month: int):
     month_period = f"{month:02d}.{year}"
     
@@ -92,15 +98,36 @@ def build_stats_keyboard(user_id: int, year: int, month: int):
     header_text = f"<b>{get_month_str(year, month)}</b>\nExpenses: <b>-{total:.1f}</b>"
     return header_text, InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# --- 4. Командалар жана баскычтарды иштетүү ---
+# --- Командалар ---
 
 @dp.message(Command("start", "menu"))
 async def start_cmd(message: types.Message):
-    await message.answer(
-        "👋 Бот ишке түштү!\n\nФормат: <code>Taxi -30</code> же <code>Taxi 30</code> же <code>Taxi 30 comment</code>",
-        parse_mode="HTML",
-        reply_markup=get_reply_keyboard()
+    welcome_text = (
+        "👋 **Салам! Мен сиздин чыгымдарыңызды эсептөөгө жардам берүүчү ботмун.**\n\n"
+        "**Эсептерди кантип жазуу керек?**\n"
+        "Сумманы жана категорияны жазып жөнөтүңүз, мен дароо сактап коём.\n"
+        "Мисалы:\n"
+        "• `Taxi 150`\n"
+        "• `Еда 300`\n"
+        "• `Market 290 нан, сүт алдым`\n\n"
+        "**Өзгөртүү же өчүрүп салуу**\n"
+        "Ар бир жазылган чыгымдын астында **«Изменить»** жана **«Отменить»** баскычтары чыгат:\n"
+        "• **«Изменить»** — сумманы, категорияны же комментарийди оңдоо.\n"
+        "• **«Отменить»** — акыркы жазылган чыгымды базадан өчүрүү.\n\n"
+        "**Негизги баскычтар жана командалар:**\n"
+        "• **Today** — бүгүнкү чыгымдарыңыздын тизмеси.\n"
+        "• **Statistics** — айлык статистика жана мурунку айлардын архиви (`<<` жана `>>` баскычтары аркылуу).\n"
+        "• `/reset` — сиздин бардык чыгымдарыңызды толугу менен тазалоо.\n\n"
+        "Баары даяр! Жөн гана биринчи чыгымды жазып көрүңүз (мисалы: `Taxi 100`)."
     )
+    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_reply_keyboard())
+
+@dp.message(Command("reset"))
+async def reset_db_cmd(message: types.Message):
+    user_id = message.from_user.id
+    cursor.execute("DELETE FROM expenses WHERE user_id = ?", (user_id,))
+    conn.commit()
+    await message.answer("🧹 Бардык чыгымдарыңыз толугу менен тазаланды! Эми жаңыдан жаза берсеңиз болот.")
 
 @dp.message(F.text == "Today")
 async def today_cmd(message: types.Message):
@@ -133,7 +160,85 @@ async def stats_cmd(message: types.Message):
     text, markup = build_stats_keyboard(message.from_user.id, now.year, now.month)
     await message.answer(text, parse_mode="HTML", reply_markup=markup)
 
-# --- 5. Inline баскыч иштеткичтери ---
+# --- Inline баскычтар жана оңдоо логикасы ---
+
+@dp.callback_query(F.data.startswith("edit_opt:"))
+async def edit_options(callback: types.CallbackQuery):
+    await callback.answer()
+    exp_id = callback.data.split(":")[1]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сумманы өзгөртүү", callback_data=f"edit_amt:{exp_id}")],
+        [InlineKeyboardButton(text="Категорияны өзгөртүү", callback_data=f"edit_cat:{exp_id}")],
+        [InlineKeyboardButton(text="Описанижени өзгөртүү", callback_data=f"edit_comm:{exp_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить трату", callback_data=f"delete_exp:{exp_id}")]
+    ])
+    await callback.message.edit_text("Эмнени өзгөртүүнү каалайсыз?", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("cancel_exp:"))
+@dp.callback_query(F.data.startswith("delete_exp:"))
+async def delete_expense(callback: types.CallbackQuery):
+    await callback.answer()
+    exp_id = callback.data.split(":")[1]
+    
+    cursor.execute("DELETE FROM expenses WHERE id = ?", (exp_id,))
+    conn.commit()
+    
+    await callback.message.edit_text("❌ Чыгым базадан өчүрүлдү!")
+
+@dp.callback_query(F.data.startswith("edit_amt:"))
+async def edit_amt_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    exp_id = callback.data.split(":")[1]
+    await state.update_data(exp_id=exp_id)
+    await state.set_state(EditState.waiting_for_amount)
+    await callback.message.answer("Жаңы сумманы киргизиңиз (мисалы: 50):")
+
+@dp.message(EditState.waiting_for_amount)
+async def process_new_amount(message: types.Message, state: FSMContext):
+    try:
+        new_amt = float(message.text.strip())
+        data = await state.get_data()
+        cursor.execute("UPDATE expenses SET amount = ? WHERE id = ?", (new_amt, data['exp_id']))
+        conn.commit()
+        await state.clear()
+        await message.answer(f"✅ Сумма **{new_amt}** деп өзгөртүлдү!", parse_mode="Markdown")
+    except ValueError:
+        await message.answer("Сураныч, бир гана сан киргизиңиз:")
+
+@dp.callback_query(F.data.startswith("edit_cat:"))
+async def edit_cat_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    exp_id = callback.data.split(":")[1]
+    await state.update_data(exp_id=exp_id)
+    await state.set_state(EditState.waiting_for_category)
+    await callback.message.answer("Жаңы категорияны жазыңыз (мисалы: Taxi):")
+
+@dp.message(EditState.waiting_for_category)
+async def process_new_cat(message: types.Message, state: FSMContext):
+    new_cat = message.text.strip().lower()
+    data = await state.get_data()
+    cursor.execute("UPDATE expenses SET category = ? WHERE id = ?", (new_cat, data['exp_id']))
+    conn.commit()
+    await state.clear()
+    await message.answer(f"✅ Категория **{new_cat}** деп өзгөртүлдү!", parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("edit_comm:"))
+async def edit_comm_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    exp_id = callback.data.split(":")[1]
+    await state.update_data(exp_id=exp_id)
+    await state.set_state(EditState.waiting_for_comment)
+    await callback.message.answer("Жаңы комментарий киргизиңиз:")
+
+@dp.message(EditState.waiting_for_comment)
+async def process_new_comm(message: types.Message, state: FSMContext):
+    new_comm = message.text.strip()
+    data = await state.get_data()
+    cursor.execute("UPDATE expenses SET comment = ? WHERE id = ?", (new_comm, data['exp_id']))
+    conn.commit()
+    await state.clear()
+    await message.answer("✅ Комментарий өзгөртүлдү!", parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("page:"))
 async def page_cb(callback: types.CallbackQuery):
@@ -173,7 +278,7 @@ async def close_menu_cb(callback: types.CallbackQuery):
     await callback.answer()
     await callback.message.delete()
 
-# --- 6. Расходду кабыл алуу логикасы ---
+# --- Расходду кабыл алуу ---
 @dp.message()
 async def process_expense(message: types.Message):
     text = message.text.strip()
@@ -196,36 +301,38 @@ async def process_expense(message: types.Message):
         )
         conn.commit()
         
+        exp_id = cursor.lastrowid
+        
         cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id = ? AND month_period = ?", (user_id, month_period))
         month_total = cursor.fetchone()[0] or 0.0
-        
-        cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id = ? AND date_str = ?", (user_id, date_str))
-        today_total = cursor.fetchone()[0] or 0.0
         
         cursor.execute("SELECT SUM(amount) FROM expenses WHERE user_id = ? AND month_period = ? AND category = ?", (user_id, month_period, category))
         cat_total = cursor.fetchone()[0] or 0.0
         
         reply = (
-            f"Saved\n"
-            f"<b>-{amount:.2f} category {category}</b>\n\n"
-            f"--------\n"
-            f"this month: <b>-{month_total:.1f}</b>\n"
-            f"today: <b>-{today_total:.1f}</b>\n"
-            f"In the category {category}: <b>-{cat_total:.1f}</b>"
+            f"✓ <b>{amount:.0f} · {category.capitalize()}</b>\n\n"
+            f"В категории «{category.capitalize()}» за текущий период: <b>{cat_total:.0f}</b>\n"
+            f"Всего потрачено: <b>{month_total:.0f}</b>"
         )
         
-        await message.answer(reply, parse_mode="HTML", reply_markup=get_reply_keyboard())
+        action_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Изменить", callback_data=f"edit_opt:{exp_id}"),
+                    InlineKeyboardButton(text="Отменить", callback_data=f"cancel_exp:{exp_id}")
+                ]
+            ]
+        )
+        
+        await message.answer(reply, parse_mode="HTML", reply_markup=action_keyboard)
     else:
-        await message.answer("⚠️ Формат туура эмес.\nМисалы: <code>Taxi 30</code> же <code>Taxi -30 comment</code>", parse_mode="HTML", reply_markup=get_reply_keyboard())
+        await message.answer("⚠️ Формат туура эмес.\nМисалы: <code>Taxi 30</code> же <code>Taxi 30 comment</code>", parse_mode="HTML", reply_markup=get_reply_keyboard())
 
-# --- 7. Ботту иштетүү ---
+# --- Render үчүн Web Server жана ботту запуск кылуу ---
 async def handle(request):
     return web.Response(text="Bot is running!")
 
 async def main():
- #   print("Бот иштеп жатат...")
- #   await dp.start_polling(bot)
- # Render "Free Web Service" өчүрүп салбашы үчүн чакан веб-сервер
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
