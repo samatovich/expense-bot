@@ -14,8 +14,8 @@ from aiogram.types import (
 )
 from aiohttp import web
 
-BOT_TOKEN = "8868559408:AAGKUVWQ2_Dbcqse9FdNpu69QhV-FvduTX"
-
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8868559408:AAGKUVWQ2_Dbcqse9FdNpu69QhV-FvduTX")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
